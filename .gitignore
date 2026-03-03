@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Environment
+.env
+backend/.env
+frontend/.env
+
+# Build output
+frontend/dist/
+*.egg-info/
+
+# Logs
+backend/logs/
+*.log
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
