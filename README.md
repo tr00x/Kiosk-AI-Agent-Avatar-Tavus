@@ -6,6 +6,11 @@ Powered by [Tavus CVI](https://www.tavus.io/) + [Daily.co](https://www.daily.co/
 
 ![React](https://img.shields.io/badge/React-18.3-61DAFB?logo=react) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi) ![Tavus](https://img.shields.io/badge/Tavus-CVI-blueviolet) ![Daily.co](https://img.shields.io/badge/Daily.co-WebRTC-orange) ![MySQL](https://img.shields.io/badge/MySQL-Open_Dental-4479A1?logo=mysql) ![PWA](https://img.shields.io/badge/PWA-Installable-5A0FC8)
 
+<p align="center">
+  <img src="docs/screenshot-idle.jpg" alt="Idle Screen" width="400" />
+  <img src="docs/screenshot-session.jpg" alt="Active Session" width="400" />
+</p>
+
 ---
 
 ## How It Works
