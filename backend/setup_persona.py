@@ -5,9 +5,11 @@ Usage:
     python setup_persona.py
 
 Creates:
-1. Objectives (information-only flow: verify → inform → assist → end)
-2. Guardrails (HIPAA, brevity, read-only, safety rules)
+1. Objectives (verify → inform → check-in/book → end)
+2. Guardrails (HIPAA, brevity, no-SMS, safety rules)
 3. Persona (slim prompt + objectives + guardrails + layers + tools)
+
+8 function tools (4 read, 4 write).
 
 Prints the persona_id to save in .env as TAVUS_PERSONA_ID.
 """
@@ -65,11 +67,11 @@ The patient is looking at a kiosk screen during this conversation.
 4) Don't read EVERY detail — just the highlights (appointment type, time, provider).
    The screen handles the rest.
 
-READ-ONLY MODE:
-You can ONLY look up information. You CANNOT check in patients, book appointments,
-or send messages. If a patient asks to check in, book, or get a text reminder:
-"The front desk will take care of that for you! Just have a seat."
-NEVER pretend you can do these things. NEVER offer to check them in or book anything.
+CAPABILITIES:
+You CAN check in patients and book appointments using your tools.
+You CANNOT send text messages. For that: "The front desk will take care of that!"
+After checking someone in: "All set! Have a seat and we'll call you shortly."
+After booking: "You're all booked! The front desk will confirm your doctor."
 
 SYSTEM NOTES:
 Messages starting with "SYSTEM_NOTE:" are instructions from the kiosk system, NOT the patient.
@@ -84,17 +86,17 @@ Don't linger — wrap up promptly.
 """
 
 # ---------------------------------------------------------------------------
-# Objectives — information-only flow (read-only, no check-in/booking)
+# Objectives — verify → inform → check-in/book → end
 # ---------------------------------------------------------------------------
 
 OBJECTIVES = [
     {
         "objective_name": "collect_patient_identity",
         "objective_prompt": (
-            "Collect the patient's full name (first and last). "
+            "Ask for name AND date of birth in ONE question: "
+            "'Hi! Could you tell me your full name and date of birth?' "
             "The screen will display the name you search for, so the patient can see it. "
-            "If only first name: 'And your last name?' "
-            "Then ask DOB: 'And your date of birth?' "
+            "If patient gives only name, ask DOB. If only first name, ask last name. "
             "Call verify_patient with name and DOB. "
             "The system uses fuzzy matching — even approximate names may find the right patient. "
             "If not found: 'Hmm, could you spell your last name for me?'"
@@ -127,27 +129,68 @@ OBJECTIVES = [
             "The system already tried fuzzy matching but couldn't find the patient. "
             "Ask: 'Could you spell your last name for me letter by letter?' "
             "Collect corrected spelling and/or DOB. Call verify_patient again. "
-            "If still not found: 'No worries! The front desk will help you out.'"
+            "If still not found: 'No worries! Would you like to book an appointment as a new patient?'"
         ),
         "confirmation_mode": "auto",
         "next_conditional_objectives": {
             "inform_and_assist": "If TOOL_RESULT says verified",
-            "end_warmly": "If verification fails again",
+            "collect_new_patient_info": "If verification fails again and patient wants to book",
+            "end_warmly": "If patient does not want to book or wants front desk help",
         },
     },
     {
         "objective_name": "inform_and_assist",
         "objective_prompt": (
-            "Patient is verified. The screen now shows a dashboard with their info. "
-            "VOICE THE KEY INFO from TOOL_RESULT — narrate what appeared on screen: "
-            "  - If has appointment: 'Found you! You've got a [type] at [time] with [provider].' "
-            "  - If no appointment: 'Found you! I don't see anything scheduled for today though.' "
-            "  - Mention balance briefly if nonzero: 'Looks like there's a balance of [amount] on your account.' "
-            "Then say: 'It's all on your screen! Any questions I can help with?' "
-            "Answer questions about balance, upcoming appointments, clinic info (hours, doctors, parking, insurance). "
-            "If patient asks to check in, book, or get a text: 'The front desk will take care of that for you!' "
-            "Only call get_balance or get_appointments if the patient specifically asks about them. "
-            "When patient has no more questions, move to end_warmly."
+            "Patient verified. Tell them what you found. "
+            "Has appointment: 'You have [type] at [time]. Want me to check you in?' "
+            "When patient says yes/sure/please: IMMEDIATELY call check_in_patient. Do NOT ask again. "
+            "No appointment: 'Nothing scheduled today. Want to book?' "
+            "Keep it brief. Everything is on their screen."
+        ),
+        "confirmation_mode": "auto",
+        "next_conditional_objectives": {
+            "offer_booking": "If patient wants to book or has no appointment today",
+            "end_warmly": "If patient is done",
+        },
+    },
+    {
+        "objective_name": "offer_booking",
+        "objective_prompt": (
+            "If patient already said what type (cleaning, cosmetic, etc) AND a date — IMMEDIATELY call find_available_slots. "
+            "If only type known, ask date. If only date known, ask type. If neither, ask both. "
+            "Emergency/pain → 'See the front desk right away!' Do NOT book. "
+            "You MUST call find_available_slots — NEVER make up times. "
+            "Present ONLY times from the tool result. When patient picks a time → confirm_booking."
+        ),
+        "confirmation_mode": "auto",
+        "next_conditional_objectives": {
+            "confirm_booking": "If patient picked an available time slot",
+            "end_warmly": "If patient changes mind or wants front desk help",
+        },
+    },
+    {
+        "objective_name": "collect_new_patient_info",
+        "objective_prompt": (
+            "verify_patient could not find this patient and they want to book. "
+            "You ALREADY know their name and DOB from the verify attempt — do NOT ask again. "
+            "Only collect what's missing: "
+            "'What's a good phone number for you?' "
+            "Then: 'Do you have dental insurance? If so, which one?' "
+            "Call create_patient with first_name, last_name, dob, phone, and insurance (or 'none'). "
+            "Then proceed to offer_booking."
+        ),
+        "confirmation_mode": "auto",
+        "next_required_objective": "offer_booking",
+    },
+    {
+        "objective_name": "confirm_booking",
+        "objective_prompt": (
+            "Patient picked a time. "
+            "If you haven't asked about insurance yet: 'Do you have dental insurance? If so, which one?' "
+            "If insurance was already collected (e.g. during new patient registration), skip this question. "
+            "Then you MUST call the book_appointment tool. Do NOT say 'booked' until you get the tool result. "
+            "NEVER pretend to book — you MUST use the tool. "
+            "On success: confirm date/time from the result. On error: direct to front desk."
         ),
         "confirmation_mode": "auto",
         "next_required_objective": "end_warmly",
@@ -156,8 +199,9 @@ OBJECTIVES = [
         "objective_name": "end_warmly",
         "objective_prompt": (
             "Wrap up the conversation warmly and briefly. "
-            "If patient has an appointment: 'The front desk will check you in. Have a great visit!' "
-            "If no appointment: 'The front desk is right over there if you need anything!' "
+            "If patient was checked in: 'You're all set! Have a seat and we'll call you shortly.' "
+            "If patient booked an appointment: 'See you on [date]! Have a great day.' "
+            "Otherwise: 'The front desk is right over there if you need anything!' "
             "Keep it brief and friendly."
         ),
         "confirmation_mode": "auto",
@@ -205,19 +249,19 @@ GUARDRAILS = {
             ),
         },
         {
-            "guardrail_name": "read_only",
+            "guardrail_name": "no_sms",
             "guardrail_prompt": (
-                "You can ONLY look up information. You CANNOT check in patients, book appointments, "
-                "send SMS, or modify any records. If a patient asks you to do any of these: "
+                "You CAN check in patients and book appointments using your tools. "
+                "You CANNOT send SMS or text messages. If asked: "
                 "'The front desk will take care of that for you!' "
-                "NEVER offer to check in, book, or send reminders. NEVER pretend you can."
+                "NEVER offer to send texts or reminders."
             ),
         },
     ],
 }
 
 # ---------------------------------------------------------------------------
-# Tools — 4 read-only function tools (no url field — handled via frontend conversation.respond)
+# Tools — 8 function tools (4 read, 4 write) (no url field — handled via frontend conversation.respond)
 # ---------------------------------------------------------------------------
 
 TOOLS = [
@@ -297,6 +341,116 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_in_patient",
+            "description": "Check in a patient for their today's appointment. Sets arrival time. Only call AFTER patient is verified AND confirmed they want to check in. Use appointment_id from verify_patient result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appointment_id": {
+                        "type": "integer",
+                        "description": "The appointment ID from verify_patient or get_today_appointment result.",
+                    },
+                },
+                "required": ["appointment_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_available_slots",
+            "description": "Find available appointment times for a given date. Call after patient chooses a date and procedure type. Returns list of available time slots.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "The desired date in YYYY-MM-DD format. Convert spoken dates like 'next Monday' or 'March 15' to this format.",
+                    },
+                    "procedure_type": {
+                        "type": "string",
+                        "enum": ["routine_exam_cleaning", "cosmetic", "root_canal", "extraction", "tooth_replacement"],
+                        "description": "Type of appointment the patient wants.",
+                    },
+                },
+                "required": ["date", "procedure_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "book_appointment",
+            "description": "Book an appointment for the patient. Call after patient has chosen a date, time, and procedure type from available slots. Include insurance info if provided.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patient_id": {
+                        "type": "integer",
+                        "description": "Patient ID from verify_patient or create_patient result.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Appointment date in YYYY-MM-DD format.",
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Appointment time as shown to patient (e.g., '10:00 AM').",
+                    },
+                    "procedure_type": {
+                        "type": "string",
+                        "enum": ["routine_exam_cleaning", "cosmetic", "root_canal", "extraction", "tooth_replacement"],
+                        "description": "Type of appointment.",
+                    },
+                    "insurance_info": {
+                        "type": "string",
+                        "description": "Insurance provider name if patient has one, or 'none' if no insurance.",
+                    },
+                    "is_new_patient": {
+                        "type": "boolean",
+                        "description": "True if patient was just created via create_patient (not in system before).",
+                    },
+                },
+                "required": ["patient_id", "date", "time", "procedure_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_patient",
+            "description": "Create a new patient record. Only use when verify_patient could not find the patient and they want to book. Collect first name, last name, DOB, phone, and insurance first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "first_name": {
+                        "type": "string",
+                        "description": "Patient's first name.",
+                    },
+                    "last_name": {
+                        "type": "string",
+                        "description": "Patient's last name.",
+                    },
+                    "dob": {
+                        "type": "string",
+                        "description": "Date of birth in YYYY-MM-DD format.",
+                    },
+                    "phone": {
+                        "type": "string",
+                        "description": "Patient's phone number.",
+                    },
+                    "insurance": {
+                        "type": "string",
+                        "description": "Dental insurance name (e.g. 'Aetna PPO', 'Delta Dental') or 'none' if uninsured.",
+                    },
+                },
+                "required": ["first_name", "last_name", "dob", "phone"],
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -305,20 +459,24 @@ TOOLS = [
 
 LAYERS = {
     "stt": {
+        "stt_engine": "tavus-advanced",
         "smart_turn_detection": True,
-        "participant_pause_sensitivity": "high",
-        "participant_interrupt_sensitivity": "high",
+        "participant_pause_sensitivity": "low",
+        "participant_interrupt_sensitivity": "low",
         "hotwords": (
             "All Nassau Dental is the clinic name. "
             "Doctor names: Chrisphonte, Ferdman, Kalendarev, Phan, Chowdhury. "
             "Dental terms: cleaning, filling, crown, root canal, implant, "
             "orthodontics, braces, sedation, extraction, TMJ. "
+            "Common patient phrases: check me in, check in, yes please, "
+            "I'd like, I need, my name is, date of birth, birthday, insurance, "
+            "book, appointment, schedule, cleaning, next week, tomorrow. "
             "Common patient names: Ramirez, Salazar, Rodriguez, Gonzalez, Martinez, "
             "Hernandez, Lopez, Garcia, Rivera, Torres, Morales, Reyes, Cruz."
         ),
     },
     "llm": {
-        "model": "tavus-gpt-4o",
+        "model": "tavus-gpt-4.1",
         "speculative_inference": True,
         "tools": TOOLS,
     },

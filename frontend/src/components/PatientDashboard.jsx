@@ -5,7 +5,7 @@
  * Can minimize to a small pill bar with patient name.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const API_BASE = '';
 
@@ -58,12 +58,24 @@ const IconList = () => (
   </svg>
 );
 
-export default function PatientDashboard({ data, conversationId }) {
+export default function PatientDashboard({ data, conversationId, checkedIn, bookedAppointment, showCheckinOffer, sendMessage, autoMinimize }) {
   const [minimized, setMinimized] = useState(false);
+  const [userExpanded, setUserExpanded] = useState(false);
+
+  // Auto-minimize when BookingFlow takes over, unless user manually expanded
+  useEffect(() => {
+    if (autoMinimize && !userExpanded) {
+      setMinimized(true);
+    } else if (!autoMinimize) {
+      setMinimized(false);
+      setUserExpanded(false);
+    }
+  }, [autoMinimize]);
   const [balance, setBalance] = useState(null);
   const [balanceError, setBalanceError] = useState(false);
   const [appointments, setAppointments] = useState(null);
   const [appointmentsError, setAppointmentsError] = useState(false);
+  const [checkinTapped, setCheckinTapped] = useState(false);
 
   const patientId = data?.patient_id;
   const patientName = data?.name || 'Patient';
@@ -75,6 +87,16 @@ export default function PatientDashboard({ data, conversationId }) {
     time: data.appointment_time,
     provider: data.appointment_provider,
   } : null;
+
+  const lastTapRef = useRef(0);
+  const handleCheckinTap = () => {
+    if (checkinTapped) return;
+    const now = Date.now();
+    if (now - lastTapRef.current < 800) return;
+    lastTapRef.current = now;
+    setCheckinTapped(true);
+    sendMessage?.('Yes, please check me in');
+  };
 
   // Auto-fetch balance on mount
   useEffect(() => {
@@ -120,7 +142,7 @@ export default function PatientDashboard({ data, conversationId }) {
   // --- Minimized pill ---
   if (minimized) {
     return (
-      <div className="pd-pill-min" onClick={() => setMinimized(false)}>
+      <div className="pd-pill-min" onClick={() => { setMinimized(false); setUserExpanded(true); }}>
         <span className="pd-pill-badge"><IconVerified /></span>
         <span className="pd-pill-name">{patientName}</span>
       </div>
@@ -140,7 +162,7 @@ export default function PatientDashboard({ data, conversationId }) {
             <div className="pd-fuzzy-hint">searched as "{searchedName}"</div>
           )}
         </div>
-        <button className="pd-minimize" onClick={() => setMinimized(true)} title="Minimize">
+        <button className="pd-minimize" onClick={() => { setMinimized(true); setUserExpanded(false); }} title="Minimize">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12" /></svg>
         </button>
       </div>
@@ -152,12 +174,22 @@ export default function PatientDashboard({ data, conversationId }) {
             <IconCalendar />
             <span className="pd-section-title">Today's Appointment</span>
           </div>
-          <div className="pd-today-card">
+          <div className={`pd-today-card ${checkedIn ? 'pd-today-card-checked' : ''}`}>
+            {checkedIn && (
+              <div className="pd-checkedin-badge">
+                <IconVerified /> Checked in at {checkedIn.time}
+              </div>
+            )}
             <div className="pd-today-type">{todayApt.type}</div>
             <div className="pd-today-details">
               <span className="pd-today-detail"><IconClock /> {todayApt.time}</span>
               <span className="pd-today-detail"><IconDoctor /> {todayApt.provider}</span>
             </div>
+            {showCheckinOffer && !checkedIn && !checkinTapped && (
+              <button className="pd-checkin-btn" onClick={handleCheckinTap}>
+                <IconVerified /> Check me in
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -213,7 +245,7 @@ export default function PatientDashboard({ data, conversationId }) {
       </div>
 
       {/* Upcoming appointments */}
-      <div className="pd-section pd-section-last">
+      <div className={`pd-section ${!bookedAppointment ? 'pd-section-last' : ''}`}>
         <div className="pd-section-header">
           <IconList />
           <span className="pd-section-title">Upcoming Appointments</span>
@@ -238,6 +270,25 @@ export default function PatientDashboard({ data, conversationId }) {
           </div>
         )}
       </div>
+
+      {bookedAppointment && (
+        <div className="pd-section pd-section-last">
+          <div className="pd-section-header">
+            <IconCalendar />
+            <span className="pd-section-title">New Booking</span>
+          </div>
+          <div className="pd-today-card pd-today-card-checked">
+            <div className="pd-checkedin-badge">
+              <IconVerified /> Appointment Booked
+            </div>
+            <div className="pd-today-type">{bookedAppointment.type}</div>
+            <div className="pd-today-details">
+              <span className="pd-today-detail"><IconClock /> {bookedAppointment.date} at {bookedAppointment.time}</span>
+            </div>
+            <div className="pd-booking-note">Front desk will confirm your doctor</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

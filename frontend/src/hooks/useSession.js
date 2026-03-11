@@ -5,14 +5,50 @@
 import { useState, useCallback } from 'react';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
+const SESSION_KEY = 'kiosk_session';
+
+function loadSaved() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    // Expire saved sessions older than 10 minutes
+    if (data.ts && Date.now() - data.ts > 10 * 60 * 1000) {
+      sessionStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return data;
+  } catch { return null; }
+}
+
+function saveSession(id, url) {
+  try {
+    if (id && url) {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id, url, ts: Date.now() }));
+    } else {
+      sessionStorage.removeItem(SESSION_KEY);
+    }
+  } catch {}
+}
 
 export function useSession() {
-  const [conversationId, setConversationId] = useState(null);
-  const [conversationUrl, setConversationUrl] = useState(null);
+  const saved = loadSaved();
+  const [conversationId, setConversationId] = useState(saved?.id || null);
+  const [conversationUrl, setConversationUrl] = useState(saved?.url || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const startSession = useCallback(async (language = 'en') => {
+    // Prevent double-click: if already loading or have active session, bail
+    if (loading) {
+      console.warn('[Session] Start already in progress, ignoring');
+      return;
+    }
+    if (conversationUrl) {
+      console.warn('[Session] Session already active, ignoring');
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -37,6 +73,7 @@ export function useSession() {
         const data = await resp.json();
         setConversationId(data.conversation_id);
         setConversationUrl(data.conversation_url);
+        saveSession(data.conversation_id, data.conversation_url);
         setLoading(false);
         return data;
       } catch (err) {
@@ -64,6 +101,7 @@ export function useSession() {
     } finally {
       setConversationId(null);
       setConversationUrl(null);
+      saveSession(null, null);
     }
   }, [conversationId]);
 
@@ -72,6 +110,7 @@ export function useSession() {
     setConversationUrl(null);
     setError(null);
     setLoading(false);
+    saveSession(null, null);
   }, []);
 
   return {

@@ -210,6 +210,8 @@ async def create_persona(persona_config: dict) -> str:
 
     logger.info("Creating Tavus persona: %s", persona_config.get("persona_name", "unnamed"))
     resp = await _client.post("/v2/personas", json=persona_config)
+    if resp.status_code >= 400:
+        logger.error("Tavus persona creation failed: %s %s", resp.status_code, resp.text)
     resp.raise_for_status()
     data = resp.json()
 

@@ -58,3 +58,51 @@ class ManualSearchRequest(BaseModel):
 class CheckinRequest(BaseModel):
     """Mark an appointment as arrived."""
     appointment_id: int
+
+
+# ---------------------------------------------------------------------------
+# Staff panel (full manual mode)
+# ---------------------------------------------------------------------------
+
+class StaffBalanceRequest(BaseModel):
+    """Staff panel: get patient balance."""
+    patient_id: int
+
+
+class StaffAppointmentsRequest(BaseModel):
+    """Staff panel: get upcoming appointments."""
+    patient_id: int
+
+
+class StaffSlotsRequest(BaseModel):
+    """Staff panel: find available slots."""
+    date: str
+    procedure_type: Optional[str] = None
+
+
+class StaffBookRequest(BaseModel):
+    """Staff panel: book appointment."""
+    patient_id: int
+    date: str
+    time: str
+    procedure_type: Optional[str] = "routine_exam_cleaning"
+
+
+class StaffRegisterRequest(BaseModel):
+    """Staff panel: register new patient."""
+    first_name: str
+    last_name: str
+    dob: str
+    phone: Optional[str] = None
+    insurance: Optional[str] = None
+
+
+class StaffNoteRequest(BaseModel):
+    """Staff panel: add a note to a patient."""
+    patient_id: int
+    text: str
+
+
+class StaffNotesQuery(BaseModel):
+    """Staff panel: get notes for a patient."""
+    patient_id: int

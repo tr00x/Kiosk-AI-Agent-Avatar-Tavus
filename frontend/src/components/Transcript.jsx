@@ -12,7 +12,7 @@ const MAX_LINES = 4;
 
 let lineIdCounter = 0;
 
-export default function Transcript({ transcript, raised }) {
+export default function Transcript({ transcript, raised, panelBottom }) {
   const [lines, setLines] = useState([]);
   const prevTranscriptRef = useRef(null);
 
@@ -45,7 +45,10 @@ export default function Transcript({ transcript, raised }) {
   if (lines.length === 0) return null;
 
   return (
-    <div className={`transcript-container ${raised ? 'transcript-raised' : ''}`}>
+    <div
+      className={`transcript-container ${raised ? 'transcript-raised' : ''}`}
+      style={raised && panelBottom ? { bottom: `${panelBottom + 12}px` } : undefined}
+    >
       {lines.map((line) => (
         <div
           key={line.id}

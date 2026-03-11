@@ -48,7 +48,7 @@ export default function Avatar({ status }) {
         playsInline
         muted={false}
       />
-      <audio id="avatar-audio" autoPlay />
+      <audio id="avatar-audio" autoPlay muted />
 
       {/* Connecting overlay on top of blurred idle video */}
       {showIdle && (

@@ -4,8 +4,12 @@ Each function handles a Tavus tool call webhook:
 1. verify_patient — Identity verification via name + DOB
 2. get_balance — Patient account balance
 3. get_appointments — Upcoming appointments list
-4. book_appointment — Submit appointment request
-5. send_sms_reminder — Send SMS reminder via Twilio
+4. get_today_appointment — Today's appointment for check-in flow
+5. check_in_patient — Mark patient as arrived
+6. find_available_slots — Find open 30-min slots on a date
+7. create_patient — Create new patient record
+8. book_appointment — Book appointment in Open Dental
+9. send_sms_reminder — Send SMS reminder via Twilio
 
 All functions query the Open Dental MySQL database via db.py and
 log every action to the audit table for HIPAA compliance.
@@ -13,7 +17,7 @@ log every action to the audit table for HIPAA compliance.
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -55,6 +59,24 @@ _PROC_MAP = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Booking procedure type → (ProcDescript, human label)
+# ---------------------------------------------------------------------------
+PROCEDURE_MAP = {
+    "routine_exam_cleaning": ("Ex, Pro", "Routine exam and cleaning"),
+    "cleaning": ("Ex, Pro", "Routine exam and cleaning"),
+    "exam": ("Ex, Pro", "Routine exam and cleaning"),
+    "routine": ("Ex, Pro", "Routine exam and cleaning"),
+    "cosmetic": ("Consult", "Cosmetic consultation"),
+    "root_canal": ("RCT", "Root canal evaluation"),
+    "extraction": ("Ext", "Tooth extraction"),
+    "tooth_replacement": ("Consult", "Tooth replacement evaluation"),
+    "implant": ("Consult", "Tooth replacement evaluation"),
+    "consult": ("Consult", "Consultation"),
+    "consultation": ("Consult", "Consultation"),
+}
+
+
 def _simplify_proc(raw: str) -> str:
     """Map Open Dental ProcDescript to human-readable label."""
     if not raw:
@@ -92,13 +114,25 @@ def _parse_dob(dob_str: str) -> str:
         month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
         return f"{year:04d}-{month:02d}-{day:02d}"
 
-    # Try natural language: "March 15 1985", "15 March 1985", etc.
-    try:
-        from dateutil.parser import parse as dateutil_parse
-        dt = dateutil_parse(s)
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    # Try common natural language formats
+    _MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    # "March 15 1985" or "March 15, 1985"
+    m = re.match(r"^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$", s)
+    if m:
+        month_name = m.group(1).lower()
+        if month_name in _MONTHS:
+            return f"{int(m.group(3)):04d}-{_MONTHS[month_name]:02d}-{int(m.group(2)):02d}"
+    # "15 March 1985"
+    m = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$", s)
+    if m:
+        month_name = m.group(2).lower()
+        if month_name in _MONTHS:
+            return f"{int(m.group(3)):04d}-{_MONTHS[month_name]:02d}-{int(m.group(1)):02d}"
 
     raise ValueError(f"Cannot parse date: {dob_str}")
 
@@ -132,14 +166,18 @@ def _format_provider(row: dict) -> str:
     name = (row.get("provider_name") or "").strip()
     abbr = (row.get("provider_abbr") or "").strip()
     if name:
-        parts = name.split()
-        if not any(tok in (p.upper() for p in parts) for tok in _NON_PERSON):
-            return f"Dr. {name}"
+        upper_parts = {p.upper() for p in name.split()}
+        if upper_parts & _NON_PERSON:
+            return "your dentist"  # generic — receptionist assigns real doctor
+        return f"Dr. {name}"
     if abbr:
+        upper_abbr = {p.upper() for p in abbr.split()}
+        if upper_abbr & _NON_PERSON:
+            return "your dentist"
         if abbr.lower().startswith("dr"):
             return abbr
         return f"Dr. {abbr}"
-    return "our dental team"
+    return "your dentist"
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +368,7 @@ async def verify_patient(conversation_id: str, name: str, dob: str, phone_last4:
             "verified": False,
             "reason": "not_found",
             "searched_name": name,
+            "searched_dob": dob,
             "message": "No patient found with that name and date of birth.",
         }
 
@@ -499,6 +538,7 @@ async def get_today_appointment(conversation_id: str, patient_id: int) -> dict:
             a.ProcDescript,
             a.AptStatus,
             a.Confirmed,
+            a.DateTimeArrived,
             CONCAT(pr.FName, ' ', pr.LName) AS provider_name,
             pr.Abbr AS provider_abbr,
             o.OpName AS room
@@ -526,7 +566,8 @@ async def get_today_appointment(conversation_id: str, patient_id: int) -> dict:
             dt = datetime.fromisoformat(dt)
         time_str = dt.strftime("%I:%M %p").lstrip("0")
 
-        already_checked_in = row.get("Confirmed") == 5
+        dta = row.get("DateTimeArrived")
+        already_checked_in = dta is not None and dta > datetime(1, 1, 1)
 
         appointments.append({
             "appointment_id": int(row["AptNum"]),
@@ -554,13 +595,12 @@ async def get_today_appointment(conversation_id: str, patient_id: int) -> dict:
 async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
     """Check in a patient for their appointment (AI agent tool).
 
-    Marks the appointment as arrived (Confirmed = 5 in Open Dental)
-    and logs the action for HIPAA audit.
+    Sets DateTimeArrived = NOW() in Open Dental and logs for HIPAA audit.
     """
-    # Verify the appointment exists and check its status (READ ONLY)
+    # Verify the appointment exists and check its status
     rows = await execute_query(
         """
-        SELECT a.AptNum, a.AptStatus, a.Confirmed, a.PatNum
+        SELECT a.AptNum, a.AptStatus, a.Confirmed, a.PatNum, a.DateTimeArrived
         FROM appointment a
         WHERE a.AptNum = %s
         """,
@@ -574,79 +614,294 @@ async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
     apt = rows[0]
     patient_id = int(apt["PatNum"])
 
-    if apt["Confirmed"] == 5:
+    # Already checked in?
+    dta = apt.get("DateTimeArrived")
+    if dta is not None and dta > datetime(1, 1, 1):
+        arrived_time = dta.strftime("%I:%M %p").lstrip("0") if isinstance(dta, datetime) else "Earlier"
         await log_tool_call(conversation_id, "check_in_patient", patient_id, "already_checked_in", f"apt_id={appointment_id}")
-        return {"status": "already_checked_in", "message": "You're already checked in for this appointment!"}
+        return {"status": "already_checked_in", "appointment_id": appointment_id, "checked_in_time": arrived_time, "message": "You're already checked in for this appointment!"}
 
     if apt["AptStatus"] != 1:
         await log_tool_call(conversation_id, "check_in_patient", patient_id, "invalid_status", f"apt_id={appointment_id}, status={apt['AptStatus']}")
         return {"status": "error", "message": "This appointment cannot be checked in."}
 
-    # ---- TEMPORARILY DISABLED: DB write to Open Dental ----
-    # affected = await execute_update(
-    #     "UPDATE appointment SET Confirmed = 5 WHERE AptNum = %s AND AptStatus = 1",
-    #     (appointment_id,),
-    # )
-    #
-    # if affected == 0:
-    #     await log_tool_call(conversation_id, "check_in_patient", patient_id, "update_failed", f"apt_id={appointment_id}")
-    #     return {"status": "error", "message": "Could not check in. Please see the front desk."}
-    # ---- END DISABLED ----
+    # Set arrival time
+    affected = await execute_update(
+        "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND DateTimeArrived <= '0001-01-01'",
+        (appointment_id,),
+    )
 
-    await log_tool_call(conversation_id, "check_in_patient", patient_id, "checked_in (DRY RUN)", f"apt_id={appointment_id}")
-    logger.info("[DRY RUN] check_in_patient: would UPDATE appointment %s SET Confirmed=5", appointment_id)
+    if affected == 0:
+        await log_tool_call(conversation_id, "check_in_patient", patient_id, "update_failed", f"apt_id={appointment_id}")
+        return {"status": "error", "message": "Could not check in. Please see the front desk."}
+
+    now = datetime.now()
+    await log_tool_call(conversation_id, "check_in_patient", patient_id, "checked_in", f"apt_id={appointment_id}")
+    logger.info("check_in_patient: SET DateTimeArrived=NOW() on appointment %s", appointment_id)
 
     return {
         "status": "checked_in",
+        "appointment_id": appointment_id,
+        "checked_in_time": now.strftime("%I:%M %p").lstrip("0"),
         "message": "You're all checked in! Please have a seat and we'll call you shortly.",
     }
 
 
-async def book_appointment(
-    conversation_id: str, patient_id: int, date_str: str, time_str: str, procedure: str = ""
+async def find_available_slots(
+    conversation_id: str, date_str: str, procedure_type: str = ""
 ) -> dict:
-    """Submit an appointment request (does NOT write directly to Open Dental schedule)."""
+    """Find available 30-minute appointment slots on a given date.
 
-    # ---- TEMPORARILY DISABLED: DB write ----
-    # await execute_ddl("""
-    #     CREATE TABLE IF NOT EXISTS kiosk_appointment_requests (
-    #         id INT AUTO_INCREMENT PRIMARY KEY,
-    #         PatNum INT NOT NULL,
-    #         requested_date DATE,
-    #         requested_time VARCHAR(20),
-    #         reason TEXT,
-    #         status VARCHAR(20) DEFAULT 'pending',
-    #         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    #     )
-    # """)
-    #
-    # request_id = await execute_insert(
-    #     """
-    #     INSERT INTO kiosk_appointment_requests
-    #         (PatNum, requested_date, requested_time, reason)
-    #     VALUES (%s, %s, %s, %s)
-    #     """,
-    #     (patient_id, date_str, time_str, procedure),
-    # )
-    #
-    # confirmation = f"REQ-{request_id:04d}"
-    # ---- END DISABLED ----
+    Checks provider schedules in Open Dental, subtracts existing appointments,
+    and returns up to 6 open slots.
+    """
+    # Parse the requested date
+    try:
+        target_date = datetime.strptime(_parse_dob(date_str), "%Y-%m-%d").date()
+    except (ValueError, Exception) as e:
+        await log_tool_call(conversation_id, "find_available_slots", None, "parse_date_failed", f"date={date_str}")
+        return {"status": "error", "message": f"Could not understand the date: {date_str}. Please try again."}
 
-    confirmation = f"REQ-DRY-{patient_id}"
-    logger.info("[DRY RUN] book_appointment: would INSERT for patient %s, date=%s, time=%s", patient_id, date_str, time_str)
+    # Must be a future date (not today or in the past)
+    today = date.today()
+    if target_date <= today:
+        await log_tool_call(conversation_id, "find_available_slots", None, "past_date", f"date={target_date}")
+        return {"status": "error", "message": "Please choose a future date — I can only book appointments for tomorrow or later."}
+
+    # Reject weekends
+    if target_date.weekday() >= 5:
+        await log_tool_call(conversation_id, "find_available_slots", None, "weekend", f"date={target_date}")
+        return {"status": "no_slots", "message": f"The office is closed on weekends. Please choose a weekday."}
+
+    # Get provider schedules for that date (BlockoutType=0 means actual provider schedule)
+    schedules = await execute_query(
+        """
+        SELECT StartTime, StopTime
+        FROM schedule
+        WHERE SchedDate = %s
+          AND BlockoutType = 0
+          AND ProvNum > 0
+        """,
+        (target_date.isoformat(),),
+    )
+
+    # Fallback: if no provider schedules exist, use default office hours (9 AM – 5 PM)
+    use_default_hours = False
+    if not schedules:
+        use_default_hours = True
+        logger.info("find_available_slots: No schedules for %s, using default office hours 9am-5pm", target_date)
+
+    # Determine the overall time window from schedules
+    if use_default_hours:
+        min_start = 9 * 3600   # 9 AM
+        max_stop = 17 * 3600   # 5 PM
+    else:
+        # StartTime/StopTime are timedelta objects in MySQL
+        min_start = None
+        max_stop = None
+        for sched in schedules:
+            start = sched["StartTime"]
+            stop = sched["StopTime"]
+            if isinstance(start, timedelta):
+                start_seconds = int(start.total_seconds())
+            else:
+                start_seconds = int(start) if start else 0
+            if isinstance(stop, timedelta):
+                stop_seconds = int(stop.total_seconds())
+            else:
+                stop_seconds = int(stop) if stop else 0
+
+            if min_start is None or start_seconds < min_start:
+                min_start = start_seconds
+            if max_stop is None or stop_seconds > max_stop:
+                max_stop = stop_seconds
+
+        if min_start is None or max_stop is None or min_start >= max_stop:
+            await log_tool_call(conversation_id, "find_available_slots", None, "invalid_schedule", f"date={target_date}")
+            return {"status": "no_slots", "message": "No available times on that date."}
+
+    # Get existing appointments for that date
+    existing_apts = await execute_query(
+        """
+        SELECT AptDateTime
+        FROM appointment
+        WHERE DATE(AptDateTime) = %s
+          AND AptStatus = 1
+        """,
+        (target_date.isoformat(),),
+    )
+
+    # Collect existing appointment start times as total seconds from midnight
+    booked_seconds = set()
+    for apt in existing_apts:
+        dt = apt["AptDateTime"]
+        if isinstance(dt, str):
+            dt = datetime.fromisoformat(dt)
+        apt_seconds = dt.hour * 3600 + dt.minute * 60
+        booked_seconds.add(apt_seconds)
+
+    # Generate 30-min slots and exclude overlapping ones
+    slot_duration = 1800  # 30 minutes in seconds
+    available = []
+    current = min_start
+    while current + slot_duration <= max_stop:
+        # Check if any existing appointment starts within 30 min of this slot
+        conflict = False
+        for booked in booked_seconds:
+            if abs(booked - current) < slot_duration:
+                conflict = True
+                break
+        if not conflict:
+            hours = current // 3600
+            minutes = (current % 3600) // 60
+            slot_dt = datetime(target_date.year, target_date.month, target_date.day, hours, minutes)
+            time_label = slot_dt.strftime("%I:%M %p").lstrip("0")
+            available.append({"time": time_label})
+        current += slot_duration
+
+    if not available:
+        await log_tool_call(conversation_id, "find_available_slots", None, "fully_booked", f"date={target_date}")
+        return {"status": "no_slots", "message": f"No available times on {target_date.strftime('%B %d')}. Would you like to try a different date?"}
+
+    # Limit to 6 slots to keep it conversational
+    slots = available[:6]
+    date_label = target_date.strftime("%B %d").replace(" 0", " ")
 
     await log_tool_call(
-        conversation_id, "book_appointment", patient_id,
-        "submitted (DRY RUN)", f"date={date_str}, time={time_str}, ref={confirmation}",
+        conversation_id, "find_available_slots", None, "success",
+        f"date={target_date}, slots={len(slots)}/{len(available)}, procedure={procedure_type}",
     )
 
     return {
         "status": "success",
-        "confirmation_number": confirmation,
-        "date": date_str,
-        "time": time_str,
-        "procedure": procedure,
-        "message": f"Appointment request submitted! Reference: {confirmation}. Staff will confirm shortly.",
+        "date": date_label,
+        "slots": slots,
+        "total_available": len(available),
+        "message": f"I found {len(slots)} available time{'s' if len(slots) != 1 else ''} on {date_label}.",
+    }
+
+
+async def create_patient(
+    conversation_id: str, first_name: str, last_name: str, dob: str,
+    phone: str = "", insurance: str = ""
+) -> dict:
+    """Create a minimal patient record in Open Dental for new patients."""
+    # Parse DOB
+    try:
+        dob_iso = _parse_dob(dob)
+    except ValueError:
+        await log_tool_call(conversation_id, "create_patient", None, "parse_dob_failed", f"dob={dob}")
+        return {"status": "error", "message": f"Could not understand the date of birth: {dob}. Please try again."}
+
+    first_name = first_name.strip().title()
+    last_name = last_name.strip().title()
+    phone_clean = _extract_digits(phone) if phone else ""
+    insurance_clean = insurance.strip() if insurance else ""
+
+    # Note field stores insurance info for front desk reference
+    note = f"Insurance: {insurance_clean}" if insurance_clean and insurance_clean.lower() != "none" else ""
+
+    try:
+        patient_id = await execute_insert(
+            """
+            INSERT INTO patient (LName, FName, Birthdate, WirelessPhone, PatStatus, PriProv, ClinicNum, AddrNote)
+            VALUES (%s, %s, %s, %s, 0, 10, 1, %s)
+            """,
+            (last_name, first_name, dob_iso, phone_clean, note),
+        )
+    except Exception as e:
+        logger.error("create_patient INSERT failed: %s", e)
+        await log_tool_call(conversation_id, "create_patient", None, "insert_failed", str(e))
+        return {"status": "error", "message": "Could not create patient record. Please see the front desk."}
+
+    full_name = f"{first_name} {last_name}"
+    await log_tool_call(
+        conversation_id, "create_patient", patient_id, "created",
+        f"name={full_name}, dob={dob_iso}, phone={phone_clean}, insurance={insurance_clean}",
+    )
+
+    return {
+        "status": "success",
+        "patient_id": patient_id,
+        "name": full_name,
+        "insurance": insurance_clean,
+        "message": f"Patient record created for {full_name}.",
+    }
+
+
+async def book_appointment(
+    conversation_id: str, patient_id: int, date_str: str, time_str: str,
+    procedure_type: str = "", insurance_info: str = "", is_new_patient: bool = False
+) -> dict:
+    """Book an appointment by inserting directly into Open Dental."""
+    # Parse date
+    try:
+        apt_date = datetime.strptime(_parse_dob(date_str), "%Y-%m-%d").date()
+    except (ValueError, Exception):
+        await log_tool_call(conversation_id, "book_appointment", patient_id, "parse_date_failed", f"date={date_str}")
+        return {"status": "error", "message": f"Could not understand the date: {date_str}."}
+
+    # Parse time (e.g. "10:00 AM", "2:30 PM", "14:00")
+    try:
+        t = time_str.strip().upper()
+        is_pm = "PM" in t
+        is_am = "AM" in t
+        t = t.replace("AM", "").replace("PM", "").strip()
+        parts = t.split(":")
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        if is_pm and hour != 12:
+            hour += 12
+        elif is_am and hour == 12:
+            hour = 0
+        apt_datetime = datetime(apt_date.year, apt_date.month, apt_date.day, hour, minute)
+    except Exception:
+        await log_tool_call(conversation_id, "book_appointment", patient_id, "parse_time_failed", f"time={time_str}")
+        return {"status": "error", "message": f"Could not understand the time: {time_str}."}
+
+    # Look up procedure info
+    proc_key = procedure_type.lower().strip() if procedure_type else ""
+    proc_descript, proc_label = PROCEDURE_MAP.get(proc_key, ("Ex, Pro", "Dental Visit"))
+
+    # Build note
+    note_parts = ["Booked via AI kiosk"]
+    if insurance_info:
+        note_parts.append(f"Insurance: {insurance_info}")
+    note = ". ".join(note_parts)
+
+    is_new = 1 if is_new_patient else 0
+
+    try:
+        appointment_id = await execute_insert(
+            """
+            INSERT INTO appointment (
+                PatNum, AptStatus, AptDateTime, Pattern, ProvNum, Op, Confirmed,
+                ProvHyg, Assistant, ProcDescript, Note, ClinicNum, IsNewPatient
+            ) VALUES (%s, 1, %s, '//////', 10, 10, 19, 0, 0, %s, %s, 1, %s)
+            """,
+            (patient_id, apt_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+             proc_descript, note, is_new),
+        )
+    except Exception as e:
+        logger.error("book_appointment INSERT failed: %s", e)
+        await log_tool_call(conversation_id, "book_appointment", patient_id, "insert_failed", str(e))
+        return {"status": "error", "message": "Could not book the appointment. Please see the front desk."}
+
+    date_label = apt_date.strftime("%B %d").replace(" 0", " ")
+    time_label = apt_datetime.strftime("%I:%M %p").lstrip("0")
+
+    await log_tool_call(
+        conversation_id, "book_appointment", patient_id, "booked",
+        f"apt_id={appointment_id}, date={date_label}, time={time_label}, proc={proc_descript}, new={is_new}",
+    )
+
+    return {
+        "status": "success",
+        "appointment_id": appointment_id,
+        "date": date_label,
+        "time": time_label,
+        "procedure": proc_label,
+        "message": f"Your {proc_label.lower()} is booked for {date_label} at {time_label}!",
     }
 
 
@@ -843,14 +1098,12 @@ async def search_patient_today(last_name: Optional[str] = None, dob_str: Optiona
 
 
 async def checkin_appointment(apt_num: int) -> dict:
-    """Mark an appointment as arrived (Confirmed=5 in Open Dental)."""
-    # ---- TEMPORARILY DISABLED: DB write to Open Dental ----
-    # affected = await execute_update(
-    #     "UPDATE appointment SET Confirmed = 5 WHERE AptNum = %s AND AptStatus = 1",
-    #     (apt_num,),
-    # )
-    # if affected == 0:
-    #     return {"status": "error", "message": "Appointment not found or already checked in."}
-    # ---- END DISABLED ----
-    logger.info("[DRY RUN] checkin_appointment: would UPDATE appointment %s SET Confirmed=5", apt_num)
-    return {"status": "ok", "message": "Checked in successfully (dry run)."}
+    """Mark an appointment as arrived (DateTimeArrived=NOW() in Open Dental)."""
+    affected = await execute_update(
+        "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND DateTimeArrived <= '0001-01-01'",
+        (apt_num,),
+    )
+    if affected == 0:
+        return {"status": "error", "message": "Appointment not found or already checked in."}
+    logger.info("checkin_appointment: SET DateTimeArrived=NOW() on appointment %s", apt_num)
+    return {"status": "ok", "message": "Checked in successfully."}

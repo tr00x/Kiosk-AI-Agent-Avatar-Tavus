@@ -91,6 +91,38 @@ function formatToolResultMessage(toolName, result) {
       }
       return `TOOL_RESULT get_appointments: ERROR. ${result.message || 'Could not retrieve appointments.'}`;
 
+    case 'check_in_patient':
+      if (result.status === 'checked_in') {
+        return `TOOL_RESULT check_in_patient: SUCCESS. Patient checked in. Arrival time recorded. Tell them they're all set and to have a seat.`;
+      }
+      if (result.status === 'already_checked_in') {
+        return `TOOL_RESULT check_in_patient: ALREADY_CHECKED_IN. ${result.message}`;
+      }
+      return `TOOL_RESULT check_in_patient: ERROR. ${result.message || 'Check-in failed.'} Direct patient to the front desk.`;
+
+    case 'find_available_slots':
+      if (result.status === 'success' && result.slots?.length) {
+        const times = result.slots.map(s => s.time).join(', ');
+        return `TOOL_RESULT find_available_slots: FOUND ${result.slots.length} slots on ${result.date}: ${times}. Present these times to the patient and ask which one works.`;
+      }
+      if (result.status === 'no_slots') {
+        return `TOOL_RESULT find_available_slots: NO_SLOTS. ${result.message} Ask patient to try another date.`;
+      }
+      return `TOOL_RESULT find_available_slots: ERROR. ${result.message || 'Could not check availability.'} Suggest patient ask the front desk.`;
+
+    case 'book_appointment':
+      if (result.status === 'success') {
+        return `TOOL_RESULT book_appointment: SUCCESS. Booked ${result.procedure} on ${result.date} at ${result.time}. Appointment ID: ${result.appointment_id}. Tell patient they're booked and the front desk will confirm their doctor.`;
+      }
+      return `TOOL_RESULT book_appointment: ERROR. ${result.message || 'Booking failed.'} Direct patient to the front desk.`;
+
+    case 'create_patient':
+      if (result.status === 'success') {
+        const ins = result.insurance && result.insurance.toLowerCase() !== 'none' ? ` Insurance: ${result.insurance}.` : ' No insurance.';
+        return `TOOL_RESULT create_patient: SUCCESS. New patient created. [patient_id=${result.patient_id}] Name: ${result.name}.${ins} Insurance already collected — do NOT ask again. Now proceed with booking using this patient_id.`;
+      }
+      return `TOOL_RESULT create_patient: ERROR. ${result.message || 'Could not create patient record.'} Direct patient to the front desk.`;
+
     default:
       return `TOOL_RESULT ${toolName}: This feature is not available. The front desk will help with that.`;
   }
@@ -99,6 +131,7 @@ function formatToolResultMessage(toolName, result) {
 
 export function useTavusCall({
   conversationUrl,
+  dashboardData,
   onToolCallStart,
   onToolResult,
   onTranscript,
@@ -106,6 +139,8 @@ export function useTavusCall({
   onSessionEnd,
 }) {
   const callRef = useRef(null);
+  const dashboardDataRef = useRef(dashboardData);
+  dashboardDataRef.current = dashboardData;
   const [status, setStatus] = useState('idle');
 
   // Deduplicate events — Tavus/Daily can send same event up to 4x
@@ -114,11 +149,55 @@ export function useTavusCall({
   const inflightToolsRef = useRef(new Set());
   // Cooldown: tool name → timestamp. Prevents immediate re-calls (10s window).
   const toolCooldownRef = useRef(new Map());
+  // Track Jenny's speaking state to avoid interrupting her
+  const speakingRef = useRef(false);
+  // Queue of messages to inject after Jenny stops speaking
+  const pendingInjectionsRef = useRef([]);
+  // Track intentional leave to prevent reconnect attempts
+  const intentionalLeaveRef = useRef(false);
 
   const updateStatus = useCallback((newStatus) => {
     setStatus(newStatus);
     onStatusChange?.(newStatus);
   }, [onStatusChange]);
+
+  // Inject a message into the conversation, queuing if Jenny is speaking
+  const injectOrQueue = useCallback((call, msg) => {
+    if (speakingRef.current) {
+      console.log('[Tavus] Jenny speaking, queuing injection:', msg.substring(0, 60));
+      pendingInjectionsRef.current.push({ call, msg });
+    } else {
+      console.log('[Tavus] Injecting immediately:', msg.substring(0, 60));
+      call.sendAppMessage({
+        message_type: 'conversation',
+        event_type: 'conversation.respond',
+        properties: { text: msg },
+      }, '*');
+    }
+  }, []);
+
+  // Flush queued injections when Jenny stops speaking (with delay to avoid
+  // interrupting her next sentence — stopped_speaking fires between sentences too)
+  const flushTimerRef = useRef(null);
+  const flushPendingInjections = useCallback((call) => {
+    if (pendingInjectionsRef.current.length === 0) return;
+    // Cancel any pending flush — Jenny might start speaking again
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = setTimeout(() => {
+      // Double-check Jenny isn't speaking again
+      if (speakingRef.current) return;
+      const pending = [...pendingInjectionsRef.current];
+      pendingInjectionsRef.current = [];
+      for (const item of pending) {
+        console.log('[Tavus] Flushing queued injection:', item.msg.substring(0, 60));
+        item.call.sendAppMessage({
+          message_type: 'conversation',
+          event_type: 'conversation.respond',
+          properties: { text: item.msg },
+        }, '*');
+      }
+    }, 1500);
+  }, []);
 
   useEffect(() => {
     if (!conversationUrl) return;
@@ -142,12 +221,7 @@ export function useTavusCall({
           if (!destroyed) updateStatus('listening');
         });
 
-        call.on('left-meeting', () => {
-          if (!destroyed) {
-            updateStatus('ended');
-            onSessionEnd?.();
-          }
-        });
+        // left-meeting is handled above with reconnection logic
 
         call.on('error', (event) => {
           console.error('[Daily] Error:', event);
@@ -160,6 +234,58 @@ export function useTavusCall({
           console.log('[Daily] Network quality:', quality);
           if (quality === 'very-low' && !destroyed) {
             console.warn('[Daily] Very low network quality detected');
+          }
+        });
+
+        // WebRTC reconnection — Daily fires these on network blips
+        call.on('nonfatal-error', (event) => {
+          console.warn('[Daily] Non-fatal error:', event?.type, event?.errorMsg);
+        });
+
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT = 3;
+
+        call.on('network-connection', (event) => {
+          const type = event?.type;
+          console.log('[Daily] Network connection:', type);
+          if (type === 'interrupted' && !destroyed) {
+            updateStatus('connecting'); // show reconnecting state
+          }
+          if (type === 'connected' && !destroyed) {
+            reconnectAttempts = 0;
+            updateStatus('listening');
+          }
+        });
+
+        // If Daily fully disconnects, attempt rejoin
+        call.on('left-meeting', async () => {
+          if (destroyed || intentionalLeaveRef.current) {
+            updateStatus('ended');
+            onSessionEnd?.();
+            return;
+          }
+          // Accidental disconnect — try to rejoin
+          if (reconnectAttempts < MAX_RECONNECT) {
+            reconnectAttempts++;
+            console.log(`[Daily] Unexpected disconnect, reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT}`);
+            updateStatus('connecting');
+            try {
+              await new Promise(r => setTimeout(r, 1000 * reconnectAttempts));
+              if (!destroyed) {
+                await call.join({ url: conversationUrl });
+                console.log('[Daily] Reconnected successfully');
+                reconnectAttempts = 0;
+              }
+            } catch (err) {
+              console.error('[Daily] Reconnect failed:', err);
+              if (reconnectAttempts >= MAX_RECONNECT && !destroyed) {
+                updateStatus('error');
+                onSessionEnd?.();
+              }
+            }
+          } else {
+            updateStatus('ended');
+            onSessionEnd?.();
           }
         });
 
@@ -255,13 +381,37 @@ export function useTavusCall({
               return;
             }
 
+            // Override LLM-hallucinated IDs with real ones from verify_patient
+            if (dashboardDataRef.current?.appointment_id && toolName === 'check_in_patient') {
+              args.appointment_id = dashboardDataRef.current.appointment_id;
+              console.log('[Tavus] Overriding appointment_id to', args.appointment_id);
+            }
+            if (dashboardDataRef.current?.patient_id && (toolName === 'book_appointment' || toolName === 'check_in_patient' || toolName === 'get_balance' || toolName === 'get_appointments')) {
+              args.patient_id = dashboardDataRef.current.patient_id;
+              console.log('[Tavus] Overriding patient_id to', args.patient_id);
+            }
+
             inflightToolsRef.current.add(toolName);
             onToolCallStart?.(toolName, args);
+
+            // Tool call timeout — if backend doesn't respond in 15s, unblock
+            const TOOL_TIMEOUT = 15000;
+            let toolTimedOut = false;
+            const toolTimer = setTimeout(() => {
+              toolTimedOut = true;
+              if (inflightToolsRef.current.has(toolName)) {
+                console.error(`[Tavus] Tool ${toolName} timed out after ${TOOL_TIMEOUT}ms`);
+                inflightToolsRef.current.delete(toolName);
+                onToolResult?.(toolName, { status: 'error', message: 'Request timed out' });
+                injectOrQueue(call, `TOOL_RESULT ${toolName}: ERROR. The request timed out. Tell the patient to try again or direct them to the front desk.`);
+              }
+            }, TOOL_TIMEOUT);
 
             // Fetch result from our backend API
             fetchToolResult(toolName, conversationId, args)
               .then((result) => {
-                if (destroyed) return;
+                clearTimeout(toolTimer);
+                if (toolTimedOut || destroyed) return;
                 console.log('[Tavus] Tool result:', toolName, result);
 
                 inflightToolsRef.current.delete(toolName);
@@ -276,30 +426,21 @@ export function useTavusCall({
                 // Tavus webhook URL responses do NOT go back to the LLM.
                 // We send the result as conversation.respond so the LLM sees it
                 // in the conversation context and can respond accordingly.
+                // If Jenny is still speaking (e.g. "Let me check..."), queue
+                // the injection until she finishes to avoid self-interruption.
                 const resultMsg = formatToolResultMessage(toolName, result);
-                console.log('[Tavus] Injecting tool result into conversation:', resultMsg.substring(0, 100));
-
-                call.sendAppMessage({
-                  message_type: 'conversation',
-                  event_type: 'conversation.respond',
-                  properties: { text: resultMsg },
-                }, '*');
+                injectOrQueue(call, resultMsg);
               })
               .catch((err) => {
-                if (destroyed) return;
+                clearTimeout(toolTimer);
+                if (toolTimedOut || destroyed) return;
                 console.error('[Tavus] Tool API error:', toolName, err);
 
                 inflightToolsRef.current.delete(toolName);
                 onToolResult?.(toolName, { status: 'error', message: `Tool call failed: ${err.message}` });
 
                 // Inject error so the LLM can respond to the patient
-                call.sendAppMessage({
-                  message_type: 'conversation',
-                  event_type: 'conversation.respond',
-                  properties: {
-                    text: `TOOL_RESULT ${toolName}: ERROR. Something went wrong. Tell the patient the system is having trouble and direct them to the front desk.`,
-                  },
-                }, '*');
+                injectOrQueue(call, `TOOL_RESULT ${toolName}: ERROR. Something went wrong. Tell the patient the system is having trouble and direct them to the front desk.`);
               });
           }
 
@@ -320,11 +461,15 @@ export function useTavusCall({
           // ===============================================================
           if (eventType === 'conversation.replica.started_speaking' ||
               eventType === 'conversation.replica_started_speaking') {
+            speakingRef.current = true;
             updateStatus('processing');
           }
           if (eventType === 'conversation.replica.stopped_speaking' ||
               eventType === 'conversation.replica_stopped_speaking') {
+            speakingRef.current = false;
             updateStatus('listening');
+            // Flush any tool results queued while Jenny was speaking
+            flushPendingInjections(call);
           }
 
           // ===============================================================
@@ -362,6 +507,8 @@ export function useTavusCall({
       destroyed = true;
       inflightToolsRef.current.clear();
       toolCooldownRef.current.clear();
+      pendingInjectionsRef.current = [];
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
       if (callRef.current) {
         callRef.current.leave().catch(() => {});
         callRef.current.destroy().catch(() => {});
@@ -371,6 +518,7 @@ export function useTavusCall({
   }, [conversationUrl]);
 
   const endCall = useCallback(() => {
+    intentionalLeaveRef.current = true;
     if (callRef.current) {
       callRef.current.leave().catch(() => {});
     }
@@ -379,12 +527,9 @@ export function useTavusCall({
   const sendMessage = useCallback((text) => {
     if (!callRef.current || !text) return;
     console.log('[Tavus] Sending text:', text);
-    callRef.current.sendAppMessage({
-      message_type: 'conversation',
-      event_type: 'conversation.respond',
-      properties: { text },
-    }, '*');
-  }, []);
+    // Route through injectOrQueue so we don't interrupt Jenny mid-sentence
+    injectOrQueue(callRef.current, text);
+  }, [injectOrQueue]);
 
   return { status, endCall, sendMessage };
 }
