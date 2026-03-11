@@ -3077,22 +3077,30 @@ html, body, #root {
 .sp-tabs {
   display: flex;
   border-bottom: 1px solid var(--border-subtle);
-  padding: 0 12px;
+  padding: 0 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  flex-shrink: 0;
 }
+.sp-tabs::-webkit-scrollbar { display: none; }
 .sp-tab {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 10px 12px;
+  gap: 3px;
+  padding: 10px 6px;
   border: none;
   background: none;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: all 0.2s;
+  white-space: nowrap;
+  flex: 1;
+  justify-content: center;
 }
 .sp-tab:hover { color: var(--text-secondary); }
 .sp-tab-active {
@@ -3642,6 +3650,27 @@ html, body, #root {
 .sp-queue-wait-long {
   color: #f59e0b;
   background: rgba(245, 158, 11, 0.1);
+}
+.sp-queue-card-info {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sp-queue-time {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.sp-queue-checkin-btn {
+  margin-top: 6px;
+  width: 100%;
+}
+.sp-queue-badge {
+  margin-top: 6px;
+  text-align: center;
 }
 
 /* Notes */

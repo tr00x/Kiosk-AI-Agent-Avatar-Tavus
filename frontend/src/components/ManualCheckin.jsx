@@ -22,10 +22,10 @@ const AUTO_LOCK_MS = 120000; // 2 min idle → lock
 
 const TABS = [
   { key: 'queue', label: 'Queue', icon: Users },
-  { key: 'patients', label: 'Patients', icon: Search },
+  { key: 'patients', label: 'Find', icon: Search },
   { key: 'book', label: 'Book', icon: CalendarDays },
-  { key: 'register', label: 'Register', icon: UserPlus },
-  { key: 'sessions', label: 'Sessions', icon: Monitor },
+  { key: 'register', label: 'New', icon: UserPlus },
+  { key: 'sessions', label: 'Live', icon: Monitor },
 ];
 
 const PROCEDURES = [
@@ -194,12 +194,23 @@ export default function ManualCheckin() {
   };
 
   // --- Check-in ---
+  const [checkinLoading, setCheckinLoading] = useState(null); // aptNum being checked in
   const handleCheckin = async (aptNum) => {
     touch();
+    setCheckinLoading(aptNum);
+    setError('');
     try {
       const data = await api('/api/manual/checkin', { appointment_id: aptNum });
-      if (data.status === 'ok') setCheckedIn(prev => ({ ...prev, [aptNum]: true }));
-    } catch { /* */ }
+      if (data.status === 'ok') {
+        setCheckedIn(prev => ({ ...prev, [aptNum]: true }));
+      } else {
+        setError(data.message || 'Check-in failed');
+      }
+    } catch {
+      setError('Check-in request failed');
+    } finally {
+      setCheckinLoading(null);
+    }
   };
 
   // --- Notes ---
@@ -436,42 +447,49 @@ export default function ManualCheckin() {
 
                   {queue?.length > 0 ? (
                     queue.map(q => (
-                      <button
-                        key={q.apt_num}
-                        className="sp-queue-card"
-                        onClick={() => {
-                          selectPatient({
-                            pat_num: q.pat_num,
-                            apt_num: q.apt_num,
-                            first_name: q.name.split(' ')[0],
-                            last_name: q.name.split(' ').slice(1).join(' '),
-                            procedure: q.procedure,
-                            time: q.appointment_time,
-                            provider: q.provider,
-                          });
-                          setTab('patients');
-                        }}
-                      >
-                        <div className="sp-queue-row-top">
-                          <span className="sp-queue-name">{q.name}</span>
-                          <span className={`sp-queue-wait ${q.wait_minutes > 15 ? 'sp-queue-wait-long' : ''}`}>
-                            <Timer size={12} /> {q.wait_minutes >= 60 ? `${Math.floor(q.wait_minutes / 60)}h ${q.wait_minutes % 60}m` : `${q.wait_minutes}m`}
-                          </span>
+                      <div key={q.apt_num} className="sp-queue-card">
+                        <div
+                          className="sp-queue-card-info"
+                          onClick={() => {
+                            selectPatient({
+                              pat_num: q.pat_num,
+                              apt_num: q.apt_num,
+                              first_name: q.name.split(' ')[0],
+                              last_name: q.name.split(' ').slice(1).join(' '),
+                              procedure: q.procedure,
+                              time: q.appointment_time,
+                              provider: q.provider,
+                            });
+                            setTab('patients');
+                          }}
+                        >
+                          <div className="sp-queue-row-top">
+                            <span className="sp-queue-name">{q.name}</span>
+                            <span className="sp-queue-time"><Clock size={12} /> {q.appointment_time}</span>
+                          </div>
+                          <div className="sp-detail-meta">
+                            <span>{q.procedure}</span>
+                            {q.provider && <span><User size={11} /> {q.provider}</span>}
+                          </div>
                         </div>
-                        <div className="sp-detail-meta">
-                          <span><Clock size={11} /> Appt {q.appointment_time}</span>
-                          <span>Arrived {q.arrived_at}</span>
-                        </div>
-                        <div className="sp-detail-meta">
-                          <span>{q.procedure}</span>
-                          {q.provider && <span><User size={11} /> {q.provider}</span>}
-                        </div>
-                      </button>
+                        {checkedIn[q.apt_num] ? (
+                          <div className="sp-badge-ok sp-queue-badge"><CheckCircle2 size={12} /> Done</div>
+                        ) : (
+                          <button
+                            className="sp-btn-success sp-queue-checkin-btn"
+                            onClick={(e) => { e.stopPropagation(); handleCheckin(q.apt_num); }}
+                            disabled={checkinLoading === q.apt_num}
+                          >
+                            {checkinLoading === q.apt_num ? <Loader2 size={14} className="sp-spin" /> : <CalendarCheck size={14} />}
+                            {checkinLoading === q.apt_num ? 'Checking in...' : 'Check In'}
+                          </button>
+                        )}
+                      </div>
                     ))
                   ) : queue && (
                     <div className="sp-empty-small">
                       <Users size={24} strokeWidth={1.5} />
-                      <p>No one waiting</p>
+                      <p>No patients waiting</p>
                     </div>
                   )}
                 </div>
@@ -545,8 +563,8 @@ export default function ManualCheckin() {
                           {checkedIn[patient.apt_num] ? (
                             <div className="sp-badge-ok"><CheckCircle2 size={12} /> Checked in</div>
                           ) : (
-                            <button className="sp-btn-success" onClick={() => handleCheckin(patient.apt_num)}>
-                              <CalendarCheck size={14} /> Check In
+                            <button className="sp-btn-success" onClick={() => handleCheckin(patient.apt_num)} disabled={checkinLoading === patient.apt_num}>
+                              {checkinLoading === patient.apt_num ? <><Loader2 size={14} className="sp-spin" /> Checking in...</> : <><CalendarCheck size={14} /> Check In</>}
                             </button>
                           )}
                         </div>

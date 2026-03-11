@@ -567,7 +567,7 @@ async def get_today_appointment(conversation_id: str, patient_id: int) -> dict:
         time_str = dt.strftime("%I:%M %p").lstrip("0")
 
         dta = row.get("DateTimeArrived")
-        already_checked_in = dta is not None and dta > datetime(1, 1, 1)
+        already_checked_in = isinstance(dta, datetime) and dta > datetime(1, 1, 1) and (dta.hour != 0 or dta.minute != 0 or dta.second != 0)
 
         appointments.append({
             "appointment_id": int(row["AptNum"]),
@@ -615,9 +615,11 @@ async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
     patient_id = int(apt["PatNum"])
 
     # Already checked in?
+    # Open Dental sets DateTimeArrived to the appointment date at midnight (00:00:00)
+    # as default — that does NOT mean checked in.  Only a non-midnight time counts.
     dta = apt.get("DateTimeArrived")
-    if dta is not None and dta > datetime(1, 1, 1):
-        arrived_time = dta.strftime("%I:%M %p").lstrip("0") if isinstance(dta, datetime) else "Earlier"
+    if isinstance(dta, datetime) and dta > datetime(1, 1, 1) and (dta.hour != 0 or dta.minute != 0 or dta.second != 0):
+        arrived_time = dta.strftime("%I:%M %p").lstrip("0")
         await log_tool_call(conversation_id, "check_in_patient", patient_id, "already_checked_in", f"apt_id={appointment_id}")
         return {"status": "already_checked_in", "appointment_id": appointment_id, "checked_in_time": arrived_time, "message": "You're already checked in for this appointment!"}
 
@@ -627,7 +629,7 @@ async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
 
     # Set arrival time
     affected = await execute_update(
-        "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND DateTimeArrived <= '0001-01-01'",
+        "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND (DateTimeArrived <= '0001-01-01' OR TIME(DateTimeArrived) = '00:00:00')",
         (appointment_id,),
     )
 
@@ -1100,7 +1102,7 @@ async def search_patient_today(last_name: Optional[str] = None, dob_str: Optiona
 async def checkin_appointment(apt_num: int) -> dict:
     """Mark an appointment as arrived (DateTimeArrived=NOW() in Open Dental)."""
     affected = await execute_update(
-        "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND DateTimeArrived <= '0001-01-01'",
+        "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND (DateTimeArrived <= '0001-01-01' OR TIME(DateTimeArrived) = '00:00:00')",
         (apt_num,),
     )
     if affected == 0:

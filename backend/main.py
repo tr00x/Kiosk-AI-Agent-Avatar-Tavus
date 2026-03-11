@@ -655,7 +655,7 @@ async def staff_get_notes(req: StaffNotesQuery):
 
 @app.get("/api/staff/queue")
 async def staff_queue():
-    """Staff panel: today's checked-in patients, ordered by arrival time."""
+    """Staff panel: today's appointments not yet checked in, ordered by time."""
     rows = await execute_query("""
         SELECT
             a.AptNum, a.PatNum, a.AptDateTime, a.DateTimeArrived,
@@ -667,25 +667,17 @@ async def staff_queue():
         LEFT JOIN provider pv ON pv.ProvNum = a.ProvNum
         WHERE DATE(a.AptDateTime) = CURDATE()
           AND a.AptStatus = 1
-          AND DATE(a.DateTimeArrived) = CURDATE()
-          AND TIME(a.DateTimeArrived) >= '05:00:00'
-        ORDER BY a.DateTimeArrived ASC
+          AND (a.DateTimeArrived <= '0001-01-01' OR TIME(a.DateTimeArrived) = '00:00:00')
+        ORDER BY a.AptDateTime ASC
     """)
-    now = datetime.now()
     queue = []
     for r in rows:
-        arrived = r.get("DateTimeArrived")
         apt_time = r.get("AptDateTime")
-        wait_minutes = 0
-        if arrived and arrived.year > 2000:
-            wait_minutes = max(0, int((now - arrived).total_seconds() / 60))
         queue.append({
             "apt_num": r["AptNum"],
             "pat_num": r["PatNum"],
             "name": f"{r['FName']} {r['LName']}",
-            "appointment_time": apt_time.strftime("%I:%M %p") if apt_time else "",
-            "arrived_at": arrived.strftime("%I:%M %p") if arrived and arrived.year > 2000 else "",
-            "wait_minutes": wait_minutes,
+            "appointment_time": apt_time.strftime("%I:%M %p").lstrip("0") if apt_time else "",
             "procedure": r.get("ProcDescript") or "General",
             "provider": r.get("provider") or "",
         })
