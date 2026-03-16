@@ -618,55 +618,50 @@ _COPY_COLS = (
 async def fill_or_create_exam_sheet(
     pat_num: int, apt_datetime: datetime, checkin_time: datetime
 ) -> Optional[int]:
-    """Fill C: time in an existing exam sheet, or create a new one.
+    """Create or fill an exam sheet depending on EXAM_SHEET_MODE.
 
-    Logic:
-    1. Look for an existing exam sheet for this patient where C: is empty.
-    2. If found — UPDATE the A:/C: field with the check-in time.
-    3. If not found — CREATE a new exam sheet from template.
+    Modes (env EXAM_SHEET_MODE):
+      "create" — always create a new sheet (default)
+      "fill"   — find today's sheet with empty C: and update it, else create new
 
     Returns the SheetNum or None on failure.
     """
     try:
-        checkin_time_str = checkin_time.strftime("%I:%M%p").lstrip("0").lower()
-        apt_time_str = apt_datetime.strftime("%I:%M %p").lstrip("0")
-
-        # 1) Look for existing exam sheet with empty C: (today only)
-        existing = await execute_query(
-            """
-            SELECT sf.SheetFieldNum, sf.SheetNum, sf.FieldValue
-            FROM sheetfield sf
-            JOIN sheet s ON s.SheetNum = sf.SheetNum
-            WHERE s.PatNum = %s
-              AND s.SheetDefNum = %s
-              AND s.IsDeleted = 0
-              AND DATE(s.DateTimeSheet) = CURDATE()
-              AND sf.SheetFieldDefNum = %s
-              AND sf.FieldValue LIKE '%%C:%%'
-              AND TRIM(SUBSTRING_INDEX(sf.FieldValue, 'C:', -1)) = ''
-            ORDER BY s.DateTimeSheet DESC
-            LIMIT 1
-            """,
-            (pat_num, EXAM_SHEETDEF_NUM, _FIELD_AC),
-        )
-
-        if existing:
-            # Found a sheet with empty C: — update it
-            row = existing[0]
-            old_value = row["FieldValue"]
-            # Replace the empty C: with the check-in time, keep original A: value
-            new_value = old_value.rstrip() + " " + checkin_time_str
-            await execute_update(
-                "UPDATE sheetfield SET FieldValue = %s WHERE SheetFieldNum = %s",
-                (new_value, row["SheetFieldNum"]),
+        # "fill" mode: try to find existing sheet with empty C:
+        if settings.exam_sheet_mode == "fill":
+            checkin_time_str = checkin_time.strftime("%I:%M%p").lstrip("0").lower()
+            existing = await execute_query(
+                """
+                SELECT sf.SheetFieldNum, sf.SheetNum, sf.FieldValue
+                FROM sheetfield sf
+                JOIN sheet s ON s.SheetNum = sf.SheetNum
+                WHERE s.PatNum = %s
+                  AND s.SheetDefNum = %s
+                  AND s.IsDeleted = 0
+                  AND DATE(s.DateTimeSheet) = CURDATE()
+                  AND sf.SheetFieldDefNum = %s
+                  AND sf.FieldValue LIKE '%%C:%%'
+                  AND TRIM(SUBSTRING_INDEX(sf.FieldValue, 'C:', -1)) = ''
+                ORDER BY s.DateTimeSheet DESC
+                LIMIT 1
+                """,
+                (pat_num, EXAM_SHEETDEF_NUM, _FIELD_AC),
             )
-            logger.info(
-                "fill_or_create_exam_sheet: updated SheetNum=%s for PatNum=%s (C: %s)",
-                row["SheetNum"], pat_num, checkin_time_str,
-            )
-            return row["SheetNum"]
 
-        # 2) No existing sheet — create new one
+            if existing:
+                row = existing[0]
+                new_value = row["FieldValue"].rstrip() + " " + checkin_time_str
+                await execute_update(
+                    "UPDATE sheetfield SET FieldValue = %s WHERE SheetFieldNum = %s",
+                    (new_value, row["SheetFieldNum"]),
+                )
+                logger.info(
+                    "fill_or_create_exam_sheet[fill]: updated SheetNum=%s for PatNum=%s (C: %s)",
+                    row["SheetNum"], pat_num, checkin_time_str,
+                )
+                return row["SheetNum"]
+
+        # "create" mode (default) or "fill" fallback — always create new
         return await _create_exam_sheet_new(pat_num, apt_datetime, checkin_time)
 
     except Exception:

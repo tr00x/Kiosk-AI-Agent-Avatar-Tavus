@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     max_call_duration: int = 180  # 3 min — covers slow patients + disambiguation
     participant_left_timeout: int = 10  # fast cleanup if user walks away
 
+    # Exam sheet mode: "create" = always new, "fill" = find existing with empty C: first
+    exam_sheet_mode: str = "create"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
