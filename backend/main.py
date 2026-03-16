@@ -200,6 +200,33 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
+# Runtime config (changeable without restart)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/config")
+async def get_config():
+    """Get current runtime settings."""
+    return {"exam_sheet_mode": settings.exam_sheet_mode}
+
+
+@app.post("/api/config")
+async def set_config(request: Request):
+    """Update runtime settings. Example: {"exam_sheet_mode": "fill"}"""
+    body = await request.json()
+    changed = {}
+    if "exam_sheet_mode" in body:
+        val = body["exam_sheet_mode"]
+        if val not in ("create", "fill"):
+            raise HTTPException(400, "exam_sheet_mode must be 'create' or 'fill'")
+        settings.exam_sheet_mode = val
+        changed["exam_sheet_mode"] = val
+    if not changed:
+        raise HTTPException(400, "No valid config keys provided")
+    logger.info("Config updated: %s", changed)
+    return {"status": "ok", "config": changed}
+
+
+# ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
 
