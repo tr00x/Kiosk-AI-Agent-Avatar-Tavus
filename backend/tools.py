@@ -24,6 +24,7 @@ from typing import Optional
 from db import execute_query, execute_insert, execute_update, execute_ddl
 from audit import log_tool_call
 from config import settings
+from printer import generate_exam_pdf, print_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -627,9 +628,12 @@ async def fill_or_create_exam_sheet(
     Returns the SheetNum or None on failure.
     """
     try:
+        apt_time_str = apt_datetime.strftime("%I:%M %p").lstrip("0")
+        checkin_time_str = checkin_time.strftime("%I:%M%p").lstrip("0").lower()
+        sheet_num = None
+
         # "fill" mode: try to find existing sheet with empty C:
         if settings.exam_sheet_mode == "fill":
-            checkin_time_str = checkin_time.strftime("%I:%M%p").lstrip("0").lower()
             existing = await execute_query(
                 """
                 SELECT sf.SheetFieldNum, sf.SheetNum, sf.FieldValue
@@ -659,10 +663,36 @@ async def fill_or_create_exam_sheet(
                     "fill_or_create_exam_sheet[fill]: updated SheetNum=%s for PatNum=%s (C: %s)",
                     row["SheetNum"], pat_num, checkin_time_str,
                 )
-                return row["SheetNum"]
+                sheet_num = row["SheetNum"]
 
         # "create" mode (default) or "fill" fallback — always create new
-        return await _create_exam_sheet_new(pat_num, apt_datetime, checkin_time)
+        if sheet_num is None:
+            sheet_num = await _create_exam_sheet_new(pat_num, apt_datetime, checkin_time)
+
+        # Print exam sheet if printer configured
+        if sheet_num and settings.printer_ip:
+            pat_rows = await execute_query(
+                "SELECT FName, LName FROM patient WHERE PatNum = %s", (pat_num,)
+            )
+            name = f"{pat_rows[0]['FName']} {pat_rows[0]['LName']}" if pat_rows else str(pat_num)
+            now = datetime.now()
+            # Get treatment note from the sheet
+            tx_rows = await execute_query(
+                "SELECT FieldValue FROM sheetfield WHERE SheetNum = %s AND SheetFieldDefNum = %s",
+                (sheet_num, _FIELD_TXNOTE),
+            )
+            tx_note = tx_rows[0]["FieldValue"] if tx_rows and tx_rows[0]["FieldValue"] else ""
+            pdf = generate_exam_pdf(
+                patient_name=name,
+                pat_num=pat_num,
+                apt_time_str=apt_time_str,
+                checkin_time_str=checkin_time_str,
+                sheet_date=now.strftime("%m/%d/%Y %I:%M:%S %p"),
+                treatment_note=tx_note,
+            )
+            await print_pdf(pdf, job_name=f"Exam_{name}_{pat_num}")
+
+        return sheet_num
 
     except Exception:
         logger.exception("fill_or_create_exam_sheet failed for PatNum=%s", pat_num)

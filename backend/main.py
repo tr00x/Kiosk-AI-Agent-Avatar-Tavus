@@ -206,7 +206,7 @@ async def health():
 @app.get("/api/config")
 async def get_config():
     """Get current runtime settings."""
-    return {"exam_sheet_mode": settings.exam_sheet_mode}
+    return {"exam_sheet_mode": settings.exam_sheet_mode, "printer_ip": settings.printer_ip}
 
 
 def _persist_env(key: str, value: str):
@@ -240,6 +240,11 @@ async def set_config(request: Request):
         settings.exam_sheet_mode = val
         _persist_env("EXAM_SHEET_MODE", val)
         changed["exam_sheet_mode"] = val
+    if "printer_ip" in body:
+        val = body["printer_ip"].strip()
+        settings.printer_ip = val
+        _persist_env("PRINTER_IP", val)
+        changed["printer_ip"] = val
     if not changed:
         raise HTTPException(400, "No valid config keys provided")
     logger.info("Config updated (persisted to .env): %s", changed)

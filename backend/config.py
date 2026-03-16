@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Exam sheet mode: "create" = always new, "fill" = find existing with empty C: first
     exam_sheet_mode: str = "create"
 
+    # Printer IP for auto-printing exam sheets (empty = printing disabled)
+    printer_ip: str = "10.0.0.127"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
