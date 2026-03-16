@@ -390,11 +390,23 @@ cloudflared tunnel --url http://localhost:8000
 
 ### Exam Sheet Auto-Fill
 
-On check-in (AI or staff), the system finds or creates an Open Dental Exam Sheet:
+On check-in (AI or staff), the system creates or fills an Open Dental Exam Sheet with appointment time (`A:`) and check-in time (`C:`).
 
-1. **Looks for today's existing sheet** with empty `C:` field for that patient
-2. **If found** — fills in the `C:` (check-in time), preserving the `A:` (scheduled time) already set by staff
-3. **If not found** — creates a new Exam Sheet from template (SheetDefNum 175) with both `A:` and `C:` filled
+**Two modes** controlled via browser console:
+
+```js
+examsheet()          // show current mode
+examsheet("create")  // always create a new sheet (default)
+examsheet("fill")    // find today's existing sheet with empty C: first, else create new
+```
+
+Or via API:
+```bash
+curl /api/config                                                          # GET current mode
+curl -X POST /api/config -H "Content-Type: application/json" -d '{"exam_sheet_mode":"fill"}'  # change mode
+```
+
+Changes apply instantly without restart. Resets to `.env` default (`EXAM_SHEET_MODE=create`) on backend restart.
 
 This integrates with Open Dental's Chart → Exam Sheet view. Staff can then open the sheet, print it, and complete remaining fields (treatment notes, procedures, etc.) by hand.
 
