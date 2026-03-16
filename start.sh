@@ -28,9 +28,9 @@ cd frontend
 VITE_API_URL="http://$LAN_IP:$BACKEND_PORT" npm run build
 cd ..
 
-# Start with PM2
+# Start with PM2 (kill ALL existing first to prevent duplicates)
 echo "[2/3] Starting services..."
-npx pm2 delete kiosk-backend kiosk-frontend 2>/dev/null || true
+npx pm2 kill 2>/dev/null || true
 npx pm2 start ecosystem.config.cjs
 
 echo "[3/3] Ready!"

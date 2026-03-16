@@ -406,9 +406,21 @@ curl /api/config                                                          # GET 
 curl -X POST /api/config -H "Content-Type: application/json" -d '{"exam_sheet_mode":"fill"}'  # change mode
 ```
 
-Changes apply instantly without restart. Resets to `.env` default (`EXAM_SHEET_MODE=create`) on backend restart.
+All settings persist to `.env` — survive restarts.
 
-This integrates with Open Dental's Chart → Exam Sheet view. Staff can then open the sheet, print it, and complete remaining fields (treatment notes, procedures, etc.) by hand.
+### Auto-Print to Network Printer
+
+On every check-in, the exam sheet is automatically printed to a network printer via IPP.
+
+```js
+printer()                // show current printer IP
+printer("10.0.0.127")   // set printer IP
+printer("off")           // disable printing
+```
+
+The system generates a PDF matching the Open Dental exam sheet layout (A:/C: times, patient name, tooth charts, PT NEEDS, RX, DR/DA/DH fields) and sends it directly to the printer. Staff fills in remaining fields by hand.
+
+Requires a network printer with IPP support (port 631) — most modern network printers support this.
 
 ---
 
