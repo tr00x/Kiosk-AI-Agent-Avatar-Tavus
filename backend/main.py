@@ -209,6 +209,25 @@ async def get_config():
     return {"exam_sheet_mode": settings.exam_sheet_mode}
 
 
+def _persist_env(key: str, value: str):
+    """Update a key in .env file so it survives restarts."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    try:
+        lines = open(env_path).readlines()
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith(f"{key}="):
+                lines[i] = f"{key}={value}\n"
+                found = True
+                break
+        if not found:
+            lines.append(f"{key}={value}\n")
+        with open(env_path, "w") as f:
+            f.writelines(lines)
+    except Exception as exc:
+        logger.warning("Could not persist %s to .env: %s", key, exc)
+
+
 @app.post("/api/config")
 async def set_config(request: Request):
     """Update runtime settings. Example: {"exam_sheet_mode": "fill"}"""
@@ -219,10 +238,11 @@ async def set_config(request: Request):
         if val not in ("create", "fill"):
             raise HTTPException(400, "exam_sheet_mode must be 'create' or 'fill'")
         settings.exam_sheet_mode = val
+        _persist_env("EXAM_SHEET_MODE", val)
         changed["exam_sheet_mode"] = val
     if not changed:
         raise HTTPException(400, "No valid config keys provided")
-    logger.info("Config updated: %s", changed)
+    logger.info("Config updated (persisted to .env): %s", changed)
     return {"status": "ok", "config": changed}
 
 
