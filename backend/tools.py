@@ -592,6 +592,177 @@ async def get_today_appointment(conversation_id: str, patient_id: int) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Exam sheet creation on check-in
+# ---------------------------------------------------------------------------
+
+EXAM_SHEETDEF_NUM = 175  # "Exam" template in Open Dental
+EXAM_SHEET_TYPE = 13
+# SheetFieldDefNum identifiers for fields we fill in
+_FIELD_AC = 3635       # "A:\r\n\r\nC:" — appointment & check-in times
+_FIELD_NAMEFL = 3383   # "Exam for [nameFL] [PatNum]"
+_FIELD_DTS = 3409      # "sheet.DateTimeSheet"
+_FIELD_TXNOTE = 3632   # "[treatmentNote]" — staff fills manually, clear placeholder
+
+# Columns to copy from sheetfielddef → sheetfield
+_COPY_COLS = (
+    "FieldType", "FieldName", "FieldValue", "FontSize", "FontName",
+    "FontIsBold", "XPos", "YPos", "Width", "Height", "GrowthBehavior",
+    "RadioButtonValue", "RadioButtonGroup", "IsRequired", "TabOrder",
+    "ReportableName", "TextAlign", "ItemColor", "IsLocked",
+    "TabOrderMobile", "UiLabelMobile", "UiLabelMobileRadioButton",
+    "CanElectronicallySign", "IsSigProvRestricted",
+)
+
+
+async def fill_or_create_exam_sheet(
+    pat_num: int, apt_datetime: datetime, checkin_time: datetime
+) -> Optional[int]:
+    """Fill C: time in an existing exam sheet, or create a new one.
+
+    Logic:
+    1. Look for an existing exam sheet for this patient where C: is empty.
+    2. If found — UPDATE the A:/C: field with the check-in time.
+    3. If not found — CREATE a new exam sheet from template.
+
+    Returns the SheetNum or None on failure.
+    """
+    try:
+        checkin_time_str = checkin_time.strftime("%I:%M%p").lstrip("0").lower()
+        apt_time_str = apt_datetime.strftime("%I:%M %p").lstrip("0")
+
+        # 1) Look for existing exam sheet with empty C: (today only)
+        existing = await execute_query(
+            """
+            SELECT sf.SheetFieldNum, sf.SheetNum, sf.FieldValue
+            FROM sheetfield sf
+            JOIN sheet s ON s.SheetNum = sf.SheetNum
+            WHERE s.PatNum = %s
+              AND s.SheetDefNum = %s
+              AND s.IsDeleted = 0
+              AND DATE(s.DateTimeSheet) = CURDATE()
+              AND sf.SheetFieldDefNum = %s
+              AND sf.FieldValue LIKE '%%C:%%'
+              AND TRIM(SUBSTRING_INDEX(sf.FieldValue, 'C:', -1)) = ''
+            ORDER BY s.DateTimeSheet DESC
+            LIMIT 1
+            """,
+            (pat_num, EXAM_SHEETDEF_NUM, _FIELD_AC),
+        )
+
+        if existing:
+            # Found a sheet with empty C: — update it
+            row = existing[0]
+            old_value = row["FieldValue"]
+            # Replace the empty C: with the check-in time, keep original A: value
+            new_value = old_value.rstrip() + " " + checkin_time_str
+            await execute_update(
+                "UPDATE sheetfield SET FieldValue = %s WHERE SheetFieldNum = %s",
+                (new_value, row["SheetFieldNum"]),
+            )
+            logger.info(
+                "fill_or_create_exam_sheet: updated SheetNum=%s for PatNum=%s (C: %s)",
+                row["SheetNum"], pat_num, checkin_time_str,
+            )
+            return row["SheetNum"]
+
+        # 2) No existing sheet — create new one
+        return await _create_exam_sheet_new(pat_num, apt_datetime, checkin_time)
+
+    except Exception:
+        logger.exception("fill_or_create_exam_sheet failed for PatNum=%s", pat_num)
+        return None
+
+
+async def _create_exam_sheet_new(
+    pat_num: int, apt_datetime: datetime, checkin_time: datetime
+) -> Optional[int]:
+    """Create a brand new Exam sheet from template with A: and C: filled in."""
+    # Get patient name
+    pat_rows = await execute_query(
+        "SELECT FName, LName FROM patient WHERE PatNum = %s", (pat_num,)
+    )
+    if not pat_rows:
+        logger.error("_create_exam_sheet_new: patient %s not found", pat_num)
+        return None
+    fname = pat_rows[0]["FName"]
+    lname = pat_rows[0]["LName"]
+
+    # Get template definition
+    tpl_rows = await execute_query(
+        "SELECT FontSize, FontName, Width, Height, IsLandscape, IsMultiPage, HasMobileLayout "
+        "FROM sheetdef WHERE SheetDefNum = %s",
+        (EXAM_SHEETDEF_NUM,),
+    )
+    if not tpl_rows:
+        logger.error("_create_exam_sheet_new: sheetdef %s not found", EXAM_SHEETDEF_NUM)
+        return None
+    tpl = tpl_rows[0]
+
+    now = datetime.now()
+    apt_time_str = apt_datetime.strftime("%I:%M %p").lstrip("0")
+    checkin_time_str = checkin_time.strftime("%I:%M%p").lstrip("0").lower()
+
+    # 1) Insert sheet record
+    sheet_num = await execute_insert(
+        """INSERT INTO sheet
+           (SheetType, PatNum, DateTimeSheet, FontSize, FontName, Width, Height,
+            IsLandscape, InternalNote, Description, ShowInTerminal, IsWebForm,
+            IsMultiPage, IsDeleted, SheetDefNum, DocNum, ClinicNum,
+            DateTSheetEdited, HasMobileLayout, RevID, WebFormSheetID)
+        VALUES (%s, %s, %s, %s, %s, %s, %s,
+                %s, '', 'Exam', 0, 0,
+                %s, 0, %s, 0, 0,
+                %s, %s, 0, 0)""",
+        (
+            EXAM_SHEET_TYPE, pat_num, now,
+            tpl["FontSize"], tpl["FontName"], tpl["Width"], tpl["Height"],
+            tpl["IsLandscape"],
+            tpl["IsMultiPage"], EXAM_SHEETDEF_NUM,
+            now, tpl["HasMobileLayout"],
+        ),
+    )
+
+    # 2) Copy all fields from template
+    select_cols = ", ".join(_COPY_COLS)
+    field_defs = await execute_query(
+        f"SELECT SheetFieldDefNum, {select_cols} FROM sheetfielddef "
+        f"WHERE SheetDefNum = %s ORDER BY SheetFieldDefNum",
+        (EXAM_SHEETDEF_NUM,),
+    )
+
+    name_str = f"Exam for {fname} {lname} {pat_num}"
+    dt_sheet_str = now.strftime("%m/%d/%Y %I:%M:%S %p")
+
+    insert_cols = "SheetNum, SheetFieldDefNum, " + ", ".join(_COPY_COLS)
+    placeholders = ", ".join(["%s"] * (2 + len(_COPY_COLS)))
+
+    for fd in field_defs:
+        def_num = fd["SheetFieldDefNum"]
+        vals = [fd[c] for c in _COPY_COLS]
+
+        # Substitute dynamic values
+        if def_num == _FIELD_AC:
+            vals[2] = f"A: {apt_time_str}\n\nC: {checkin_time_str}"
+        elif def_num == _FIELD_NAMEFL:
+            vals[2] = name_str
+        elif def_num == _FIELD_DTS:
+            vals[2] = dt_sheet_str
+        elif def_num == _FIELD_TXNOTE:
+            vals[2] = ""  # clear placeholder, staff fills manually
+
+        await execute_insert(
+            f"INSERT INTO sheetfield ({insert_cols}) VALUES ({placeholders})",
+            (sheet_num, def_num, *vals),
+        )
+
+    logger.info(
+        "_create_exam_sheet_new: created SheetNum=%s for PatNum=%s (A: %s, C: %s)",
+        sheet_num, pat_num, apt_time_str, checkin_time_str,
+    )
+    return sheet_num
+
+
 async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
     """Check in a patient for their appointment (AI agent tool).
 
@@ -627,6 +798,12 @@ async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
         await log_tool_call(conversation_id, "check_in_patient", patient_id, "invalid_status", f"apt_id={appointment_id}, status={apt['AptStatus']}")
         return {"status": "error", "message": "This appointment cannot be checked in."}
 
+    # Get appointment time for exam sheet before updating
+    apt_time_rows = await execute_query(
+        "SELECT AptDateTime FROM appointment WHERE AptNum = %s", (appointment_id,),
+    )
+    apt_datetime = apt_time_rows[0]["AptDateTime"] if apt_time_rows else None
+
     # Set arrival time
     affected = await execute_update(
         "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND (DateTimeArrived <= '0001-01-01' OR TIME(DateTimeArrived) = '00:00:00')",
@@ -638,6 +815,13 @@ async def check_in_patient(conversation_id: str, appointment_id: int) -> dict:
         return {"status": "error", "message": "Could not check in. Please see the front desk."}
 
     now = datetime.now()
+
+    # Create exam sheet with A: and C: times
+    if apt_datetime:
+        sheet_num = await fill_or_create_exam_sheet(patient_id, apt_datetime, now)
+        if sheet_num:
+            logger.info("check_in_patient: exam sheet %s created for apt %s", sheet_num, appointment_id)
+
     await log_tool_call(conversation_id, "check_in_patient", patient_id, "checked_in", f"apt_id={appointment_id}")
     logger.info("check_in_patient: SET DateTimeArrived=NOW() on appointment %s", appointment_id)
 
@@ -1101,11 +1285,27 @@ async def search_patient_today(last_name: Optional[str] = None, dob_str: Optiona
 
 async def checkin_appointment(apt_num: int) -> dict:
     """Mark an appointment as arrived (DateTimeArrived=NOW() in Open Dental)."""
+    # Get appointment info for exam sheet before updating
+    apt_rows = await execute_query(
+        "SELECT PatNum, AptDateTime FROM appointment WHERE AptNum = %s", (apt_num,),
+    )
+
     affected = await execute_update(
         "UPDATE appointment SET DateTimeArrived = NOW() WHERE AptNum = %s AND AptStatus = 1 AND (DateTimeArrived <= '0001-01-01' OR TIME(DateTimeArrived) = '00:00:00')",
         (apt_num,),
     )
     if affected == 0:
         return {"status": "error", "message": "Appointment not found or already checked in."}
+
+    now = datetime.now()
+
+    # Create exam sheet with A: and C: times
+    if apt_rows:
+        pat_num = int(apt_rows[0]["PatNum"])
+        apt_datetime = apt_rows[0]["AptDateTime"]
+        sheet_num = await fill_or_create_exam_sheet(pat_num, apt_datetime, now)
+        if sheet_num:
+            logger.info("checkin_appointment: exam sheet %s created for apt %s", sheet_num, apt_num)
+
     logger.info("checkin_appointment: SET DateTimeArrived=NOW() on appointment %s", apt_num)
     return {"status": "ok", "message": "Checked in successfully."}
