@@ -53,7 +53,7 @@ Powered by [Tavus CVI](https://www.tavus.io/) + [Daily.co](https://www.daily.co/
 - **Conversational AI Avatar** — Tavus CVI replica with natural video, lip-sync, real-time voice
 - **Hybrid Voice + Touch UI** — Patients can speak or tap (procedure cards, time slots, check-in button)
 - **Patient Verification** — 3-tier fuzzy matching (exact SQL → SOUNDEX → difflib)
-- **Check-In** — Records arrival time in Open Dental
+- **Check-In** — Records arrival time + creates/fills Exam Sheet in Open Dental (A: scheduled time, C: check-in time)
 - **Appointment Booking** — Procedure picker → date/time slots → confirmation
 - **New Patient Registration** — Collects name, DOB, phone, insurance conversationally
 - **Patient Dashboard** — Real-time card with appointment, balance, upcoming visits
@@ -62,7 +62,7 @@ Powered by [Tavus CVI](https://www.tavus.io/) + [Daily.co](https://www.daily.co/
 
 ### Staff Panel (PIN-protected sidebar)
 - **Patient Search** — Search by name + DOB, view details
-- **Manual Check-In** — Override check-in for any patient
+- **Manual Check-In** — Override check-in for any patient (also creates/fills Exam Sheet)
 - **Booking** — Search patient by name, book appointments
 - **Waiting Queue** — Today's checked-in patients sorted by wait time
 - **Patient Notes** — Add/view notes per patient (stored in kiosk_patient_notes table)
@@ -373,7 +373,7 @@ cloudflared tunnel --url http://localhost:8000
 | POST | `/tools/get_today_appointment` | Today's appointment lookup |
 | POST | `/tools/get_balance` | Account balance breakdown |
 | POST | `/tools/get_appointments` | Upcoming appointments |
-| POST | `/tools/check_in_patient` | Record patient arrival |
+| POST | `/tools/check_in_patient` | Record patient arrival + create/fill Exam Sheet |
 | POST | `/tools/find_available_slots` | Find open appointment slots |
 | POST | `/tools/book_appointment` | Book a new appointment |
 | POST | `/tools/create_patient` | Register new patient |
@@ -383,10 +383,20 @@ cloudflared tunnel --url http://localhost:8000
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/manual/search` | Search patients by name + DOB |
-| POST | `/api/manual/checkin` | Manual check-in |
+| POST | `/api/manual/checkin` | Manual check-in + create/fill Exam Sheet |
 | GET | `/api/staff/queue` | Today's waiting queue |
 | POST | `/api/staff/notes` | Add patient note |
 | POST | `/api/staff/notes/list` | Get patient notes |
+
+### Exam Sheet Auto-Fill
+
+On check-in (AI or staff), the system finds or creates an Open Dental Exam Sheet:
+
+1. **Looks for today's existing sheet** with empty `C:` field for that patient
+2. **If found** — fills in the `C:` (check-in time), preserving the `A:` (scheduled time) already set by staff
+3. **If not found** — creates a new Exam Sheet from template (SheetDefNum 175) with both `A:` and `C:` filled
+
+This integrates with Open Dental's Chart → Exam Sheet view. Staff can then open the sheet, print it, and complete remaining fields (treatment notes, procedures, etc.) by hand.
 
 ---
 
