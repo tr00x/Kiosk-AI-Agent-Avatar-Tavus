@@ -422,6 +422,27 @@ The system generates a PDF matching the Open Dental exam sheet layout (A:/C: tim
 
 Requires a network printer with IPP support (port 631) — most modern network printers support this.
 
+### Audio & Noise Isolation
+
+The kiosk uses a **Jabra Speak 410** USB speakerphone (4-mic array + speaker with hardware noise isolation) for lobby environments.
+
+**Software-side audio stack:**
+- **Daily.co Krisp noise cancellation** — AI-powered noise filtering before audio reaches Tavus STT
+- **Jabra auto-detection** — on call join, the system finds and selects the Jabra device (mic + speaker) by name; falls back to system default if unplugged
+- **WebRTC constraints** — `echoCancellation`, `noiseSuppression`, `autoGainControl` explicitly enabled
+- **Fast turn-taking** — `participant_pause_sensitivity: "high"` for immediate responses; `participant_interrupt_sensitivity: "low"` to ignore background noise
+
+Console logs to verify:
+```
+[Audio] Jabra mic selected: Jabra SPEAK 410 USB
+[Audio] Jabra speaker selected: Jabra SPEAK 410 USB
+```
+
+If Jabra is not connected:
+```
+[Audio] Jabra not found, using system default
+```
+
 ---
 
 ## Architecture Notes
