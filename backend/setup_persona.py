@@ -472,7 +472,7 @@ LAYERS = {
     "stt": {
         "stt_engine": "tavus-advanced",
         "smart_turn_detection": True,
-        "participant_pause_sensitivity": "low",
+        "participant_pause_sensitivity": "high",
         "participant_interrupt_sensitivity": "low",
         "hotwords": (
             "All Nassau Dental is the clinic name. "

@@ -213,12 +213,46 @@ export function useTavusCall({
 
         const call = DailyIframe.createCallObject({
           videoSource: false,
+          inputSettings: {
+            audio: {
+              processor: { type: 'noise-cancellation' },
+              settings: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+            },
+          },
         });
 
         callRef.current = call;
 
-        call.on('joined-meeting', () => {
+        call.on('joined-meeting', async () => {
           if (!destroyed) updateStatus('listening');
+
+          // Auto-select Jabra speakerphone if connected
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const jabraMic = devices.find(
+              (d) => d.kind === 'audioinput' && d.label.toLowerCase().includes('jabra')
+            );
+            const jabraSpk = devices.find(
+              (d) => d.kind === 'audiooutput' && d.label.toLowerCase().includes('jabra')
+            );
+            if (jabraMic) {
+              await call.setInputDevicesAsync({ audioDeviceId: jabraMic.deviceId });
+              console.log('[Audio] Jabra mic selected:', jabraMic.label);
+            }
+            if (jabraSpk) {
+              await call.setOutputDeviceAsync({ outputDeviceId: jabraSpk.deviceId });
+              console.log('[Audio] Jabra speaker selected:', jabraSpk.label);
+            }
+            if (!jabraMic && !jabraSpk) {
+              console.warn('[Audio] Jabra not found, using system default');
+            }
+          } catch (err) {
+            console.warn('[Audio] Device selection failed:', err.message);
+          }
         });
 
         // left-meeting is handled above with reconnection logic
