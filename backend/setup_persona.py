@@ -471,9 +471,6 @@ TOOLS = [
 LAYERS = {
     "stt": {
         "stt_engine": "tavus-advanced",
-        "smart_turn_detection": True,
-        "participant_pause_sensitivity": "high",
-        "participant_interrupt_sensitivity": "low",
         "hotwords": (
             "All Nassau Dental is the clinic name. "
             "Doctor names: Chrisphonte, Ferdman, Kalendarev, Phan, Chowdhury. "
@@ -485,6 +482,11 @@ LAYERS = {
             "Common patient names: Ramirez, Salazar, Rodriguez, Gonzalez, Martinez, "
             "Hernandez, Lopez, Garcia, Rivera, Torres, Morales, Reyes, Cruz."
         ),
+    },
+    "conversational_flow": {
+        "turn_detection_model": "sparrow-1",
+        "turn_taking_patience": "low",
+        "replica_interruptibility": "low",
     },
     "llm": {
         "model": "tavus-gpt-4.1",
